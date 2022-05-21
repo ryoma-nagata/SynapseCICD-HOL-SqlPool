@@ -1,4 +1,4 @@
-name: build-dacpac-$(rev:r)
+name: sql-deployment-$(rev:r)
 
 trigger:
   # none
