@@ -1,0 +1,140 @@
+name: build-dacpac-$(rev:r)
+
+trigger:
+  # none
+  branches:
+    include:
+      - 'main'
+      - 'release/*'
+
+  paths:
+    include:
+      - sql/*
+      - code/*
+
+# pr: # PRトリガーはAzure Reposの場合、branch policyで実装します。https://docs.microsoft.com/ja-jp/azure/devops/pipelines/repos/azure-repos-git?view=azure-devops&tabs=yaml#pr-triggers
+  # branches:
+  #   include:
+  #     - 'main'
+  #     - 'release/*'
+  # paths:
+  #   include:
+  #     - infra/*
+  #     - code/*
+  #     - .ado/workflows/azure-pipelines-ci-qa-bicep.yml
+
+
+variables:
+  - name: AZURE_RESOURCE_MANAGER_CONNECTION_NAME
+    value: "azure-devops-service-connection" # Update to '{yourResourceManagerConnectionName}'
+  - name: TARGET_SOLUTION_FOLDER
+    value: "$(System.DefaultWorkingDirectory)/sql"
+  - name: TARGET_SOLUTION_FILENAME
+    value: "sql.sln"
+  - name: TARGET_WORKSPACE_NAME_STG
+    value: "" # xxx.sql.azuresynapse.net
+  - name: TARGET_DATABASE_NAME
+    value: "dwh001"
+
+stages:
+- stage: Build
+  displayName: "Build stage"
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: 'windows-2019'
+    steps:
+      # Checkout code
+      - checkout: self
+        name: checkout_repository
+        displayName: Checkout repository
+        submodules: true
+        lfs: false
+        clean: true
+        continueOnError: false
+        enabled: true
+
+          # - script: |
+          #     echo "PR from "$(System.PullRequest.SourceBranch)
+          #     if [[ $(System.PullRequest.SourceBranch) == "refs/heads/users/"* ]]
+          #     then
+          #         echo "check ok"
+          #     else
+          #         echo 'Please PR to correct branch'
+          #     fi
+          #   displayName: 'Check source branch' 
+
+      - task: VSBuild@1
+        displayName: 'Build solution'
+        inputs:
+          solution: '$(TARGET_SOLUTION_FOLDER)/$(TARGET_SOLUTION_FILENAME)'
+          configuration: release
+
+      - task: CopyFiles@2
+        displayName: 'Copy Files to:  $(build.artifactstagingdirectory)'
+        inputs:
+          SourceFolder: '$(TARGET_SOLUTION_FOLDER)'
+          TargetFolder: ' $(build.artifactstagingdirectory)'
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact: dacpac'
+        inputs:
+          ArtifactName: dacpac
+
+- stage: Release
+  displayName: Release stage
+
+
+  jobs:
+  - deployment: DeploySynapsePool
+    displayName: Deploy Synapse Dedicated SQL Pool
+    pool:
+      vmImage: 'windows-2019'
+    environment: STG
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          # SQL Deploy taskでの解除は管理リソースグループの参照がひつようなため
+          - task: AzurePowerShell@5
+            displayName: 'Allow Azure DevOps Agent Ip'
+            inputs:
+              azureSubscription: $(AZURE_RESOURCE_MANAGER_CONNECTION_NAME)
+              ScriptType: 'InlineScript'
+              azurePowerShellVersion: 'LatestVersion'
+              errorActionPreference: 'continue'
+              Inline: |
+                # You can write your azure powershell scripts inline here. 
+                # You can also pass predefined and custom variables to this script using arguments
+                # Install-Module -Name "Az.Synapse" -Confirm:$false  -Scope CurrentUser  -Force
+                $ADO_Agent_IP = (Invoke-RestMethod http://ipinfo.io/json | Select -exp ip)
+                New-AzSynapseFirewallRule -WorkspaceName "$(TARGET_WORKSPACE_NAME_STG)" -Name ADO_Agent_IP -StartIpAddress $ADO_Agent_IP -EndIpAddress $ADO_Agent_IP
+                Start-Sleep -Seconds 30
+                Get-AzSynapseFirewallRule -WorkspaceName "$(TARGET_WORKSPACE_NAME_STG)"
+          - task: SqlAzureDacpacDeployment@1
+            inputs:
+              azureSubscription: $(AZURE_RESOURCE_MANAGER_CONNECTION_NAME)
+              AuthenticationType: 'servicePrincipal'
+              ServerName: '$(TARGET_WORKSPACE_NAME_STG).sql.azuresynapse.net'
+              DatabaseName: $(TARGET_DATABASE_NAME)
+              deployType: 'DacpacTask'
+              DeploymentAction: 'Publish'
+              DacpacFile: '$(Pipeline.Workspace)/dacpac/bin/Release/sql.dacpac'
+              # AdditionalArguments: '/p:BlockOnPossibleDataLoss=False' # User this argument if you want to unlock data loss by removing columns or altering schemas of existing tables
+              # IpDetectionMethod: 'AutoDetect'
+
+          # SQL Deploy taskでの解除は管理リソースグループの参照がひつようなため
+          - task: AzurePowerShell@5
+            displayName: 'Remove Azure DevOps Agent Ip'
+            condition: always()
+            inputs:
+              azureSubscription: $(AZURE_RESOURCE_MANAGER_CONNECTION_NAME)
+              ScriptType: 'InlineScript'
+              azurePowerShellVersion: 'LatestVersion'
+              Inline: |
+                # You can write your azure powershell scripts inline here. 
+                # You can also pass predefined and custom variables to this script using arguments
+                # Install-Module -Name "Az.Synapse" -Confirm:$false  -Scope CurrentUser  -Force
+                Remove-AzSynapseFirewallRule -WorkspaceName "$(TARGET_WORKSPACE_NAME_STG)" -Name ADO_Agent_IP -Force
