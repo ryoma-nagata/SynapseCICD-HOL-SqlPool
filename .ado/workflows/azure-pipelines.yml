@@ -32,7 +32,7 @@ variables:
   - name: TARGET_SOLUTION_FILENAME
     value: "sql.sln"
   - name: TARGET_WORKSPACE_NAME_STG
-    value: "" # xxx.sql.azuresynapse.net
+    value: "" # syanpseリソース名
   - name: TARGET_DATABASE_NAME
     value: "dwh001"
 
